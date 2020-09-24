@@ -58,7 +58,7 @@ func getPluginInstance(ctx unsafe.Pointer) *cloudwatch.OutputPlugin {
 	return pluginInstances[pluginID]
 }
 
-// FLBPluginRegister is exported for fluent-bit.
+//export FLBPluginRegister
 func FLBPluginRegister(ctx unsafe.Pointer) int {
 	return output.FLBPluginRegister(ctx, "cloudwatch", "AWS CloudWatch Fluent Bit Plugin!")
 }
