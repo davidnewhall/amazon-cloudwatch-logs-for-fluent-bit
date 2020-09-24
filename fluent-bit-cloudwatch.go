@@ -15,11 +15,7 @@ package main
 
 import (
 	"C"
-	"os"
-	"path"
-	"runtime"
 	"strconv"
-	"strings"
 	"time"
 	"unsafe"
 
@@ -28,7 +24,6 @@ import (
 	"github.com/fluent/fluent-bit-go/output"
 	"github.com/sirupsen/logrus"
 )
-import "fmt"
 
 var (
 	pluginInstances []*cloudwatch.OutputPlugin // nolint: gochecknoglobals
@@ -109,7 +104,7 @@ func getConfiguration(ctx unsafe.Pointer, pluginID int) cloudwatch.OutputPluginC
 
 //export FLBPluginInit
 func FLBPluginInit(ctx unsafe.Pointer) int {
-	setupLogger()
+	plugins.SetupLogger()
 
 	err := addPluginInstance(ctx)
 	if err != nil {
@@ -186,22 +181,6 @@ func FLBPluginFlushCtx(ctx, data unsafe.Pointer, length C.int, tag *C.char) int 
 //export FLBPluginExit
 func FLBPluginExit() int {
 	return output.FLB_OK
-}
-
-func setupLogger() {
-	plugins.SetupLogger()
-
-	if !strings.EqualFold(os.Getenv("FLB_LOG_LEVEL"), "DEBUG") {
-		return
-	}
-
-	// Add the calling method and line number to each debug log line.
-	logrus.SetReportCaller(true)
-	logrus.SetFormatter(&logrus.TextFormatter{
-		CallerPrettyfier: func(f *runtime.Frame) (string, string) {
-			return f.Function + "()", fmt.Sprintf("%s:%d", path.Base(f.File), f.Line)
-		},
-	})
 }
 
 func main() {
