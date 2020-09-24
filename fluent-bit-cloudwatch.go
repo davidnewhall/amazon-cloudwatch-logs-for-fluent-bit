@@ -28,6 +28,7 @@ import (
 	"github.com/fluent/fluent-bit-go/output"
 	"github.com/sirupsen/logrus"
 )
+import "fmt"
 
 var (
 	pluginInstances []*cloudwatch.OutputPlugin // nolint: gochecknoglobals
@@ -198,7 +199,7 @@ func setupLogger() {
 	logrus.SetReportCaller(true)
 	logrus.SetFormatter(&logrus.TextFormatter{
 		CallerPrettyfier: func(f *runtime.Frame) (string, string) {
-			return f.Function + "()", path.Base(f.File) + strconv.Itoa(f.Line)
+			return f.Function + "()", fmt.Sprintf("%s:%d", path.Base(f.File), f.Line)
 		},
 	})
 }
