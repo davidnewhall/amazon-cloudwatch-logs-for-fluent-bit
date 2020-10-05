@@ -6,6 +6,8 @@ import (
 	"runtime/pprof"
 	"time"
 
+	"sync"
+
 	"github.com/aws/amazon-cloudwatch-logs-for-fluent-bit/cloudwatch"
 )
 
@@ -31,13 +33,8 @@ var (
 		CredsEndpoint:        "",
 		PluginInstanceID:     0,
 		LogFormat:            "",
-	}
-	record = map[interface{}]interface{}{
-		"msg":   "log line here",
-		"ident": "app-name",
-		"kubernetes": map[interface{}]interface{}{
-			"app": "mykube",
-		},
+		WorkerPoolBuffer:     2000,
+		WorkerPoolThreads:    6,
 	}
 )
 
@@ -59,17 +56,57 @@ func main() {
 }
 
 func run(file *os.File, instance *cloudwatch.OutputPlugin) {
+	// logrus.SetLevel(logrus.DebugLevel)
 	pprof.StartCPUProfile(file)
 	defer pprof.StopCPUProfile()
 
 	start := time.Now()
 
-	addEvents(start, instance)
+	channelEvents(start, instance)
+	// addEvents(start, instance)
 	log.Println("Elapsed:", time.Since(start))
 }
 
+// addEvents runs at single routine speed.
 func addEvents(ts time.Time, instance *cloudwatch.OutputPlugin) {
-	for i := 0; i <= TestCycles; i++ {
-		instance.AddEvent(&cloudwatch.Event{TS: ts, Record: record, Tag: "input.0"})
+	log.Printf("Testing AddEvent with %d events.", TestCycles)
+
+	for i := 0; i < TestCycles; i++ {
+		instance.AddEvent(&cloudwatch.Event{TS: ts, Record: map[interface{}]interface{}{
+			"msg":   "log line here",
+			"ident": "app-name",
+			"kubernetes": map[interface{}]interface{}{
+				"app": "mykube",
+			},
+		}, Tag: "input.0"})
 	}
+}
+
+// channelEvents uses the worker pool.
+func channelEvents(ts time.Time, instance *cloudwatch.OutputPlugin) {
+	var wg sync.WaitGroup
+
+	log.Printf("Testing Events channel with %d events.", TestCycles)
+
+	// Must listen for results before sending events.
+	go func() {
+		for i := 0; i < TestCycles; i++ {
+			<-instance.Results
+		}
+		wg.Done()
+	}()
+	wg.Add(1)
+
+	for i := 0; i < TestCycles; i++ {
+		instance.Events <- &cloudwatch.Event{TS: ts, Record: map[interface{}]interface{}{
+			"msg":   "log line here",
+			"ident": "app-name",
+			"kubernetes": map[interface{}]interface{}{
+				"app": "mykube",
+			},
+		}, Tag: "input.0"}
+	}
+
+	log.Printf("Waiting for channel responses.")
+	wg.Wait()
 }

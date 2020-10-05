@@ -28,7 +28,6 @@ import (
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/cloudwatchlogs"
-	fluentbit "github.com/fluent/fluent-bit-go/output"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/sirupsen/logrus"
 	"github.com/valyala/bytebufferpool"
@@ -79,6 +78,7 @@ type Event struct {
 	TS     time.Time
 	Record map[interface{}]interface{}
 	Tag    string
+	string string
 	group  string
 	stream string
 }
@@ -101,6 +101,9 @@ type fastTemplate struct {
 
 // OutputPlugin is the CloudWatch Logs Fluent Bit output plugin
 type OutputPlugin struct {
+	Events                        chan *Event
+	Results                       chan int
+	finishEvents                  chan *Event
 	logGroupName                  *fastTemplate
 	defaultLogGroupName           string
 	logStreamPrefix               string
@@ -108,10 +111,10 @@ type OutputPlugin struct {
 	defaultLogStreamName          string
 	logKey                        string
 	Client                        LogsClient
-	streams                       map[string]*logStream
-	groups                        map[string]struct{}
-	timer                         *plugins.Timeout
-	nextLogStreamCleanUpCheckTime time.Time
+	streams                       map[string]*logStream // Not thread safe.
+	groups                        map[string]struct{}   // Not thread safe.
+	timer                         *plugins.Timeout      // Not thread safe.
+	nextLogStreamCleanUpCheckTime time.Time             // Not thread safe.
 	PluginInstanceID              int
 	logGroupTags                  map[string]*string
 	logGroupRetention             int64
@@ -137,6 +140,8 @@ type OutputPluginConfig struct {
 	CredsEndpoint        string
 	PluginInstanceID     int
 	LogFormat            string
+	WorkerPoolThreads    int64
+	WorkerPoolBuffer     int64
 }
 
 // Validate checks the configuration input for an OutputPlugin instances
@@ -182,7 +187,7 @@ func NewOutputPlugin(config OutputPluginConfig) (*OutputPlugin, error) {
 		return nil, err
 	}
 
-	return &OutputPlugin{
+	op := &OutputPlugin{
 		logGroupName:                  logGroupTemplate,
 		logStreamName:                 logStreamTemplate,
 		logStreamPrefix:               config.LogStreamPrefix,
@@ -198,7 +203,11 @@ func NewOutputPlugin(config OutputPluginConfig) (*OutputPlugin, error) {
 		logGroupRetention:             config.LogRetentionDays,
 		autoCreateGroup:               config.AutoCreateGroup,
 		groups:                        make(map[string]struct{}),
-	}, nil
+	}
+
+	op.startWorkers(config.WorkerPoolThreads, config.WorkerPoolBuffer)
+
+	return op, nil
 }
 
 func newCloudWatchLogsClient(config OutputPluginConfig) (*cloudwatchlogs.CloudWatchLogs, error) {
@@ -252,72 +261,8 @@ func newCloudWatchLogsClient(config OutputPluginConfig) (*cloudwatchlogs.CloudWa
 // the return value is one of: FLB_OK, FLB_RETRY
 // API Errors lead to an FLB_RETRY, and all other errors are logged, the record is discarded and FLB_OK is returned
 func (output *OutputPlugin) AddEvent(e *Event) int {
-	// Step 1: convert the Event data to strings, and check for a log key.
-	data, err := output.processRecord(e)
-	if err != nil {
-		logrus.Errorf("[cloudwatch %d] %v\n", output.PluginInstanceID, err)
-		// discard this single bad record and let the batch continue
-		return fluentbit.FLB_OK
-	}
-
-	// Step 2. Make sure the Event data isn't empty.
-	eventString := logString(data)
-	if len(eventString) == 0 {
-		logrus.Debugf("[cloudwatch %d] Discarding an event from publishing as it is empty\n", output.PluginInstanceID)
-		// discard this single empty record and let the batch continue
-		return fluentbit.FLB_OK
-	}
-
-	// Step 3. Assign a log group and log stream name to the Event.
-	output.setGroupStreamNames(e)
-
-	// Step 4. Create a missing log group for this Event.
-	if _, ok := output.groups[e.group]; !ok {
-		logrus.Debugf("[cloudwatch %d] Finding log group: %s", output.PluginInstanceID, e.group)
-
-		if err := output.createLogGroup(e); err != nil {
-			logrus.Error(err)
-			return fluentbit.FLB_ERROR
-		}
-
-		output.groups[e.group] = struct{}{}
-	}
-
-	// Step 5. Create or retrieve an existing log stream for this Event.
-	stream, err := output.getLogStream(e)
-	if err != nil {
-		logrus.Errorf("[cloudwatch %d] %v\n", output.PluginInstanceID, err)
-		// an error means that the log stream was not created; this is retryable
-		return fluentbit.FLB_RETRY
-	}
-
-	// Step 6. Check batch limits and flush buffer if any of these limits will be exeeded by this log Entry.
-	countLimit := len(stream.logEvents) == maximumLogEventsPerPut
-	sizeLimit := (stream.currentByteLength + cloudwatchLen(eventString)) >= maximumBytesPerPut
-	spanLimit := stream.logBatchSpan(e.TS) >= maximumTimeSpanPerPut
-	if countLimit || sizeLimit || spanLimit {
-		err = output.putLogEvents(stream)
-		if err != nil {
-			logrus.Errorf("[cloudwatch %d] %v\n", output.PluginInstanceID, err)
-			// send failures are retryable
-			return fluentbit.FLB_RETRY
-		}
-	}
-
-	// Step 7. Add this event to the running tally.
-	stream.logEvents = append(stream.logEvents, &cloudwatchlogs.InputLogEvent{
-		Message:   aws.String(eventString),
-		Timestamp: aws.Int64(e.TS.UnixNano() / 1e6), // CloudWatch uses milliseconds since epoch
-	})
-	stream.currentByteLength += cloudwatchLen(eventString)
-	if stream.currentBatchStart == nil || stream.currentBatchStart.After(e.TS) {
-		stream.currentBatchStart = &e.TS
-	}
-	if stream.currentBatchEnd == nil || stream.currentBatchEnd.Before(e.TS) {
-		stream.currentBatchEnd = &e.TS
-	}
-
-	return fluentbit.FLB_OK
+	output.Events <- e
+	return <-output.Results
 }
 
 // This plugin tracks CW Log streams

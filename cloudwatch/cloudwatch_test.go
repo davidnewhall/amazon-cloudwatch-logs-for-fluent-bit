@@ -65,6 +65,9 @@ func TestAddEvent(t *testing.T) {
 		groups:          map[string]struct{}{testLogGroup: {}},
 	}
 
+	output.startWorkers(1, 1)
+	defer close(output.Results)
+
 	record := map[interface{}]interface{}{
 		"somekey": []byte("some value"),
 	}
@@ -90,6 +93,9 @@ func TestTruncateLargeLogEvent(t *testing.T) {
 		streams:         make(map[string]*logStream),
 		groups:          map[string]struct{}{testLogGroup: {}},
 	}
+
+	output.startWorkers(1, 1)
+	defer close(output.Results)
 
 	record := map[interface{}]interface{}{
 		"somekey": make([]byte, 256*1024+100),
@@ -129,6 +135,9 @@ func TestAddEventCreateLogGroup(t *testing.T) {
 		logGroupRetention: 14,
 		autoCreateGroup:   true,
 	}
+
+	output.startWorkers(1, 1)
+	defer close(output.Results)
 
 	record := map[interface{}]interface{}{
 		"somekey": []byte("some value"),
@@ -183,6 +192,9 @@ func TestAddEventExistingStream(t *testing.T) {
 		groups:          map[string]struct{}{testLogGroup: {}},
 	}
 
+	output.startWorkers(1, 1)
+	defer close(output.Results)
+
 	record := map[interface{}]interface{}{
 		"somekey": []byte("some value"),
 	}
@@ -234,6 +246,9 @@ func TestAddEventExistingStreamNotFound(t *testing.T) {
 		groups:          map[string]struct{}{testLogGroup: {}},
 	}
 
+	output.startWorkers(1, 1)
+	defer close(output.Results)
+
 	record := map[interface{}]interface{}{
 		"somekey": []byte("some value"),
 	}
@@ -256,6 +271,9 @@ func TestAddEventEmptyRecord(t *testing.T) {
 		logKey:          "somekey",
 		groups:          map[string]struct{}{testLogGroup: {}},
 	}
+
+	output.startWorkers(1, 1)
+	defer close(output.Results)
 
 	record := map[interface{}]interface{}{
 		"somekey": []byte(""),
@@ -292,6 +310,9 @@ func TestAddEventAndFlush(t *testing.T) {
 		groups:          map[string]struct{}{testLogGroup: {}},
 	}
 
+	output.startWorkers(1, 1)
+	defer close(output.Results)
+
 	record := map[interface{}]interface{}{
 		"somekey": []byte("some value"),
 	}
@@ -306,13 +327,11 @@ func TestPutLogEvents(t *testing.T) {
 	mockCloudWatch := mock_cloudwatch.NewMockLogsClient(ctrl)
 
 	output := OutputPlugin{
-		logGroupName:    testTemplate(testLogGroup),
-		logStreamPrefix: testLogStreamPrefix,
-		Client:          mockCloudWatch,
-		timer:           setupTimeout(),
-		streams:         make(map[string]*logStream),
-		logKey:          "somekey",
-		groups:          map[string]struct{}{testLogGroup: {}},
+		Client:  mockCloudWatch,
+		timer:   setupTimeout(),
+		streams: make(map[string]*logStream),
+		logKey:  "somekey",
+		groups:  map[string]struct{}{testLogGroup: {}},
 	}
 
 	stream := &logStream{}
@@ -425,6 +444,9 @@ func TestAddEventAndFlushDataAlreadyAcceptedException(t *testing.T) {
 		groups:          map[string]struct{}{testLogGroup: {}},
 	}
 
+	output.startWorkers(1, 1)
+	defer close(output.Results)
+
 	record := map[interface{}]interface{}{
 		"somekey": []byte("some value"),
 	}
@@ -465,6 +487,9 @@ func TestAddEventAndFlushDataInvalidSequenceTokenException(t *testing.T) {
 		groups:          map[string]struct{}{testLogGroup: {}},
 	}
 
+	output.startWorkers(1, 1)
+	defer close(output.Results)
+
 	record := map[interface{}]interface{}{
 		"somekey": []byte("some value"),
 	}
@@ -476,6 +501,9 @@ func TestAddEventAndFlushDataInvalidSequenceTokenException(t *testing.T) {
 
 func TestAddEventAndBatchSpanLimit(t *testing.T) {
 	output := setupLimitTestOutput(t, 2)
+
+	output.startWorkers(1, 1)
+	defer close(output.Results)
 
 	record := map[interface{}]interface{}{
 		"somekey": []byte("some value"),
@@ -502,6 +530,9 @@ func TestAddEventAndBatchSpanLimit(t *testing.T) {
 func TestAddEventAndBatchSpanLimitOnReverseOrder(t *testing.T) {
 	output := setupLimitTestOutput(t, 2)
 
+	output.startWorkers(1, 1)
+	defer close(output.Results)
+
 	record := map[interface{}]interface{}{
 		"somekey": []byte("some value"),
 	}
@@ -527,6 +558,9 @@ func TestAddEventAndBatchSpanLimitOnReverseOrder(t *testing.T) {
 func TestAddEventAndEventsCountLimit(t *testing.T) {
 	output := setupLimitTestOutput(t, 1)
 
+	output.startWorkers(1, 1)
+	defer close(output.Results)
+
 	record := map[interface{}]interface{}{
 		"somekey": []byte("some value"),
 	}
@@ -543,6 +577,9 @@ func TestAddEventAndEventsCountLimit(t *testing.T) {
 
 func TestAddEventAndBatchSizeLimit(t *testing.T) {
 	output := setupLimitTestOutput(t, 1)
+
+	output.startWorkers(1, 1)
+	defer close(output.Results)
 
 	record := map[interface{}]interface{}{
 		"somekey": []byte(strings.Repeat("some value", 100)),

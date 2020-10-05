@@ -28,10 +28,18 @@ import (
 )
 import (
 	"strings"
+	"sync"
 )
 
+type pluginInstance struct {
+	start chan sync.WaitGroup
+	done  chan bool
+	reply chan int
+	*cloudwatch.OutputPlugin
+}
+
 var (
-	pluginInstances []*cloudwatch.OutputPlugin
+	pluginInstances []*pluginInstance
 )
 
 func addPluginInstance(ctx unsafe.Pointer) error {
@@ -49,12 +57,21 @@ func addPluginInstance(ctx unsafe.Pointer) error {
 	}
 
 	output.FLBPluginSetContext(ctx, pluginID)
-	pluginInstances = append(pluginInstances, instance)
+	pi := &pluginInstance{
+		OutputPlugin: instance,
+		start:        make(chan sync.WaitGroup),
+		done:         make(chan bool),
+		reply:        make(chan int),
+	}
+
+	pluginInstances = append(pluginInstances, pi)
+
+	go pi.processResults()
 
 	return nil
 }
 
-func getPluginInstance(ctx unsafe.Pointer) *cloudwatch.OutputPlugin {
+func getPluginInstance(ctx unsafe.Pointer) *pluginInstance {
 	pluginID := output.FLBPluginGetContext(ctx).(int)
 	return pluginInstances[pluginID]
 }
@@ -106,7 +123,7 @@ func getConfiguration(ctx unsafe.Pointer, pluginID int) cloudwatch.OutputPluginC
 	config.NewLogGroupTags = output.FLBPluginConfigKey(ctx, "new_log_group_tags")
 	logrus.Infof("[cloudwatch %d] plugin parameter new_log_group_tags = '%s'", pluginID, config.NewLogGroupTags)
 
-	config.LogRetentionDays, _ = strconv.ParseInt(output.FLBPluginConfigKey(ctx, "log_retention_days"), 10, 64)
+	config.LogRetentionDays = getIntParam(ctx, "log_retention_days", 0)
 	logrus.Infof("[cloudwatch %d] plugin parameter log_retention_days = '%d'", pluginID, config.LogRetentionDays)
 
 	config.CWEndpoint = output.FLBPluginConfigKey(ctx, "endpoint")
@@ -121,7 +138,22 @@ func getConfiguration(ctx unsafe.Pointer, pluginID int) cloudwatch.OutputPluginC
 	config.LogFormat = output.FLBPluginConfigKey(ctx, "log_format")
 	logrus.Infof("[cloudwatch %d] plugin parameter log_format = '%s'", pluginID, config.LogFormat)
 
+	config.WorkerPoolBuffer = getIntParam(ctx, "worker_pool_buffer", 3000)
+	logrus.Infof("[cloudwatch %d] plugin parameter worker_pool_buffer = '%d'", pluginID, config.WorkerPoolBuffer)
+
+	config.WorkerPoolThreads = getIntParam(ctx, "worker_pool_threads", 4)
+	logrus.Infof("[cloudwatch %d] plugin parameter worker_pool_threads = '%d'", pluginID, config.WorkerPoolThreads)
+
 	return config
+}
+
+func getIntParam(ctx unsafe.Pointer, param string, defaultVal int64) int64 {
+	val, _ := strconv.ParseInt(output.FLBPluginConfigKey(ctx, param), 10, 64)
+	if val == 0 {
+		val = defaultVal
+	}
+
+	return val
 }
 
 func getBoolParam(ctx unsafe.Pointer, param string, defaultVal bool) bool {
@@ -147,20 +179,47 @@ func FLBPluginInit(ctx unsafe.Pointer) int {
 	return output.FLB_OK
 }
 
+func (cwl *pluginInstance) processResults() {
+	var (
+		retRes int // set in loop
+		retVal int // returned
+		wg     sync.WaitGroup
+	)
+
+	for {
+		select {
+		case wg = <-cwl.start: // set the waitgroup.
+			retVal = -1 // reset return value.
+		case retRes = <-cwl.Results:
+			if retRes != output.FLB_OK && retVal != output.FLB_ERROR {
+				retVal = retRes
+			}
+
+			wg.Done()
+		case <-cwl.done:
+			cwl.reply <- retVal
+		}
+	}
+}
+
 //export FLBPluginFlushCtx
 func FLBPluginFlushCtx(ctx, data unsafe.Pointer, length C.int, tag *C.char) int {
-	var count int
-	var ret int
-	var ts interface{}
-	var record map[interface{}]interface{}
+	var (
+		count     int
+		ret       int
+		ts        interface{}
+		record    map[interface{}]interface{}
+		timestamp time.Time
+		wg        sync.WaitGroup
 
-	// Create Fluent Bit decoder
-	dec := output.NewDecoder(data, int(length))
+		dec       = output.NewDecoder(data, int(length)) // Create Fluent Bit decoder.
+		cwl       = getPluginInstance(ctx)               // Get our plugin instance.
+		fluentTag = C.GoString(tag)                      // Extract the tag.
+	)
 
-	cloudwatchLogs := getPluginInstance(ctx)
+	logrus.Debugf("[cloudwatch %d] Found logs with tag: %s", cwl.PluginInstanceID, fluentTag)
 
-	fluentTag := C.GoString(tag)
-	logrus.Debugf("[cloudwatch %d] Found logs with tag: %s", cloudwatchLogs.PluginInstanceID, fluentTag)
+	cwl.start <- wg
 
 	for {
 		// Extract Record
@@ -169,7 +228,6 @@ func FLBPluginFlushCtx(ctx, data unsafe.Pointer, length C.int, tag *C.char) int 
 			break
 		}
 
-		var timestamp time.Time
 		switch tts := ts.(type) {
 		case output.FLBTime:
 			timestamp = tts.Time
@@ -181,20 +239,28 @@ func FLBPluginFlushCtx(ctx, data unsafe.Pointer, length C.int, tag *C.char) int 
 			timestamp = time.Now()
 		}
 
-		retCode := cloudwatchLogs.AddEvent(&cloudwatch.Event{Tag: fluentTag, Record: record, TS: timestamp})
-		if retCode != output.FLB_OK {
-			return retCode
-		}
+		wg.Add(1)
+
+		cwl.Events <- &cloudwatch.Event{Tag: fluentTag, Record: record, TS: timestamp}
 		count++
 	}
-	err := cloudwatchLogs.Flush()
-	if err != nil {
+
+	logrus.Debugf("[cloudwatch %d] Processing %d events", cwl.PluginInstanceID, count)
+
+	wg.Wait()
+	cwl.done <- true
+
+	if ret = <-cwl.reply; ret != output.FLB_OK {
+		return ret
+	}
+
+	if err := cwl.Flush(); err != nil {
 		fmt.Println(err)
 		// TODO: Better error handling
 		return output.FLB_RETRY
 	}
 
-	logrus.Debugf("[cloudwatch %d] Processed %d events", cloudwatchLogs.PluginInstanceID, count)
+	logrus.Debugf("[cloudwatch %d] Successfully processed %d events", cwl.PluginInstanceID, count)
 
 	// Return options:
 	//
